@@ -33,9 +33,10 @@ jobs:
       # Step 5: Deploy to EC2
       - name: Deploy to EC2
         run: |
-          echo "$EC2_SSH_KEY" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
+          mkdir -p ~/.ssh  # Create .ssh directory
+          echo "$EC2_SSH_KEY" > ~/.ssh/id_rsa  # Create the SSH private key file
+          chmod 600 ~/.ssh/id_rsa  # Set the correct file permissions
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@${{ secrets.EC2_IP }} "cd /var/www/hello-world-nextJS && git pull && npm install && pm2 restart nextapp"
         env:
-          EC2_IP: ${{ secrets.EC2_IP }}  # Add your EC2 public IP as a secret in GitHub
-          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}  # Add the private SSH key as a secret
+          EC2_IP: ${{ secrets.EC2_IP }}  # Your EC2 public IP as a secret
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}  # The private SSH key secret
