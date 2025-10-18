@@ -20,51 +20,53 @@ jobs:
         with:
           node-version: '18'
 
-      - name: Build locally (quick fail if broken)
-        run: |
-          npm ci || npm install
-          npm run build
+      # Build on the runner first so we fail fast if something is broken
+      - name: Install deps (runner)
+        run: npm ci || npm install
+
+      - name: Build (runner)
+        run: npm run build
 
       - name: Deploy to EC2 and restart
         env:
-          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-          EC2_IP: ${{ secrets.EC2_IP }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}  # PRIVATE key (BEGIN/END included)
+          EC2_IP: ${{ secrets.EC2_IP }}            # Your EC2 public IPv4
         run: |
           mkdir -p ~/.ssh
           printf "%s" "$EC2_SSH_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
 
-          # Run a verbose, resilient deploy script on the server
-          ssh -tt -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@"$EC2_IP" 'bash -lc "
-            set -euxo pipefail
+          ssh -tt \
+            -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=10 \
+            -i ~/.ssh/id_rsa ubuntu@"$EC2_IP" 'bash -lc "
+              set -euxo pipefail
 
-            cd /home/ubuntu/hello-world-nextJS
+              cd /home/ubuntu/hello-world-nextJS
 
-            # Make sure we are exactly on the remote main state (no merge prompts)
-            git fetch origin main
-            git checkout -f main
-            git reset --hard origin/main
+              echo STEP: sync git
+              git fetch origin main
+              git checkout -f main
+              git reset --hard origin/main
 
-            # Show versions (debug)
-            which node || true
-            node -v || true
-            npm -v || true
-            pm2 -v || true
+              echo STEP: versions
+              which node || true
+              node -v || true
+              npm -v  || true
+              pm2 -v  || true   # pm2 must already be installed on the server
 
-            # Ensure pm2 exists (safe for first-time server)
-            command -v pm2 >/dev/null 2>&1 || sudo npm i -g pm2
+              echo STEP: install + build (server)
+              npm ci || npm install
+              npm run build
 
-            # Install & build on server (prod)
-            npm ci || npm install
-            npm run build
+              echo STEP: pm2 restart/start
+              if pm2 describe nextapp >/dev/null 2>&1; then
+                pm2 restart nextapp
+              else
+                # requires \"start\" in package.json, e.g. \"next start -p 3000\"
+                pm2 start \"npm -- start\" --name nextapp --time
+              fi
 
-            # Start once if not running; otherwise restart
-            if pm2 describe nextapp >/dev/null 2>&1; then
-              pm2 restart nextapp
-            else
-              # Ensure you have \"start\" script in package.json like: next start -p 3000
-              pm2 start \"npm -- start\" --name nextapp --time
-            fi
-
-            pm2 save
-          "'
+              pm2 save
+            "'
