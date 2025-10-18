@@ -2,41 +2,44 @@ name: Deploy to EC2
 
 on:
   push:
-    branches:
-      - main  # Trigger the workflow on push to the main branch
+    branches: [ main ]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-main
+      cancel-in-progress: true
 
     steps:
-      # Step 1: Checkout the repository code
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
-      # Step 2: Set up Node.js
       - name: Set up Node.js
-        uses: actions/setup-node@v2
+        uses: actions/setup-node@v4
         with:
-          node-version: '18'  # Update this to Node.js version 18 or 19
+          node-version: '18'
 
-      # Step 3: Install dependencies
-      - name: Install dependencies
-        run: |
-          npm install
+      - name: Install deps
+        run: npm ci || npm install
 
-      # Step 4: Build the project
-      - name: Build the app
-        run: |
-          npm run build
+      - name: Build app
+        run: npm run build
 
-      # Step 5: Deploy to EC2
-      - name: Deploy to EC2
-        run: |
-          mkdir -p ~/.ssh  # Create .ssh directory
-          echo "$EC2_SSH_KEY" > ~/.ssh/id_rsa  # Create the SSH private key file
-          chmod 600 ~/.ssh/id_rsa  # Set the correct file permissions
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@${{ secrets.EC2_IP }} "cd /var/www/hello-world-nextJS && git pull && npm install && pm2 restart nextapp"
+      - name: Deploy to EC2 and restart
         env:
-          EC2_IP: ${{ secrets.EC2_IP }}  # Your EC2 public IP as a secret
-          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}  # The private SSH key secret
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}  # PRIVATE key (BEGIN/END included)
+          EC2_IP: ${{ secrets.EC2_IP }}            # e.g., 18.xx.xx.xx
+        run: |
+          mkdir -p ~/.ssh
+          printf "%s" "$EC2_SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@"$EC2_IP" '
+            set -e
+            cd /home/ubuntu/hello-world-nextJS
+            git pull --ff-only
+            npm ci || npm install
+            npm run build
+            pm2 restart nextapp
+          '
