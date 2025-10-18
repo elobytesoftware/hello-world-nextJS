@@ -20,7 +20,7 @@ jobs:
         with:
           node-version: '18'
 
-      # Build on the runner first so we fail fast if something is broken
+      # Optional: build on the runner to fail fast; prod build still happens on the server
       - name: Install deps (runner)
         run: npm ci || npm install
 
@@ -29,44 +29,51 @@ jobs:
 
       - name: Deploy to EC2 and restart
         env:
-          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}  # PRIVATE key (BEGIN/END included)
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}  # PRIVATE key (include BEGIN/END lines)
           EC2_IP: ${{ secrets.EC2_IP }}            # Your EC2 public IPv4
         run: |
           mkdir -p ~/.ssh
           printf "%s" "$EC2_SSH_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
 
-          ssh -tt \
+          # Run a robust remote script via a single-quoted heredoc so nothing expands on the runner
+          ssh \
             -o StrictHostKeyChecking=no \
             -o ServerAliveInterval=30 \
             -o ServerAliveCountMax=10 \
-            -i ~/.ssh/id_rsa ubuntu@"$EC2_IP" 'bash -lc "
-              set -euxo pipefail
+            -i ~/.ssh/id_rsa ubuntu@"$EC2_IP" 'bash -s' <<'REMOTE'
+          set -euo pipefail
 
-              cd /home/ubuntu/hello-world-nextJS
+          APP_DIR="/home/ubuntu/hello-world-nextJS"   # change only if your project lives elsewhere
+          cd "$APP_DIR"
 
-              echo STEP: sync git
-              git fetch origin main
-              git checkout -f main
-              git reset --hard origin/main
+          echo "STEP: sync git"
+          git fetch origin main
+          git reset --hard origin/main
 
-              echo STEP: versions
-              which node || true
-              node -v || true
-              npm -v  || true
-              pm2 -v  || true   # pm2 must already be installed on the server
+          echo "STEP: versions"
+          which node || true
+          node -v || true
+          npm -v  || true
+          pm2 -v  || true
 
-              echo STEP: install + build (server)
-              npm ci || npm install
-              npm run build
+          echo "STEP: ensure pm2"
+          if ! command -v pm2 >/dev/null 2>&1; then
+            sudo npm i -g pm2
+          fi
 
-              echo STEP: pm2 restart/start
-              if pm2 describe nextapp >/dev/null 2>&1; then
-                pm2 restart nextapp
-              else
-                # requires \"start\" in package.json, e.g. \"next start -p 3000\"
-                pm2 start \"npm -- start\" --name nextapp --time
-              fi
+          echo "STEP: install & build (server)"
+          npm ci || npm install
+          npm run build
 
-              pm2 save
-            "'
+          echo "STEP: start/restart with pm2"
+          if pm2 describe nextapp >/dev/null 2>&1; then
+            pm2 restart nextapp
+          else
+            # requires a "start" script in package.json, e.g. "next start -p 3000"
+            pm2 start npm --name "nextapp" -- start
+          fi
+
+          pm2 save
+          echo "DEPLOY: done"
+          REMOTE
