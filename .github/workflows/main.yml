@@ -20,60 +20,62 @@ jobs:
         with:
           node-version: '18'
 
-      # Optional: build on the runner to fail fast; prod build still happens on the server
-      - name: Install deps (runner)
+      # Build everything on the GitHub runner to avoid heavy CPU/RAM usage on EC2
+      - name: Install dependencies
         run: npm ci || npm install
 
-      - name: Build (runner)
+      - name: Build app
         run: npm run build
 
+      # Package the production files for upload
+      - name: Archive build
+        run: |
+          tar -czf build.tar.gz .next public package.json package-lock.json next.config.* || true
+
+      # Deploy and restart app on EC2
       - name: Deploy to EC2 and restart
         env:
-          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}  # PRIVATE key (include BEGIN/END lines)
-          EC2_IP: ${{ secrets.EC2_IP }}            # Your EC2 public IPv4
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}  # PRIVATE key (with BEGIN/END)
+          EC2_IP: ${{ secrets.EC2_IP }}            # EC2 public IP (prefer Elastic IP)
         run: |
+          set -euxo pipefail
+
+          # Configure SSH
           mkdir -p ~/.ssh
           printf "%s" "$EC2_SSH_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
+          SSH_OPTS="-o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i ~/.ssh/id_rsa"
 
-          # Run a robust remote script via a single-quoted heredoc so nothing expands on the runner
-          ssh \
-            -o StrictHostKeyChecking=no \
-            -o ServerAliveInterval=30 \
-            -o ServerAliveCountMax=10 \
-            -i ~/.ssh/id_rsa ubuntu@"$EC2_IP" 'bash -s' <<'REMOTE'
+          # Upload the prebuilt app
+          scp $SSH_OPTS build.tar.gz ubuntu@"$EC2_IP":/home/ubuntu/build.tar.gz
+
+          # Run update commands on EC2
+          ssh $SSH_OPTS ubuntu@"$EC2_IP" 'bash -s' <<'REMOTE'
           set -euo pipefail
 
-          APP_DIR="/home/ubuntu/hello-world-nextJS"   # change only if your project lives elsewhere
+          APP_DIR="/home/ubuntu/hello-world-nextJS"
           cd "$APP_DIR"
 
-          echo "STEP: sync git"
-          git fetch origin main
-          git reset --hard origin/main
-
-          echo "STEP: versions"
-          which node || true
-          node -v || true
-          npm -v  || true
-          pm2 -v  || true
+          echo "STEP: clean old build and extract new one"
+          rm -rf .next public package.json package-lock.json || true
+          tar -xzf /home/ubuntu/build.tar.gz -C "$APP_DIR"
+          rm /home/ubuntu/build.tar.gz
 
           echo "STEP: ensure pm2"
           if ! command -v pm2 >/dev/null 2>&1; then
-            sudo npm i -g pm2
+            sudo npm install -g pm2
           fi
 
-          echo "STEP: install & build (server)"
-          npm ci || npm install
-          npm run build
+          echo "STEP: install production deps only"
+          npm ci --omit=dev || npm install --omit=dev
 
-          echo "STEP: start/restart with pm2"
+          echo "STEP: restart app via pm2"
           if pm2 describe nextapp >/dev/null 2>&1; then
-            pm2 restart nextapp
+            pm2 reload nextapp
           else
-            # requires a "start" script in package.json, e.g. "next start -p 3000"
-            pm2 start npm --name "nextapp" -- start
+            pm2 start "npm -- start" --name "nextapp" --time
           fi
 
           pm2 save
-          echo "DEPLOY: done"
+          echo "✅ DEPLOYMENT SUCCESSFUL"
           REMOTE
